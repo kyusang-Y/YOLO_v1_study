@@ -1,6 +1,4 @@
-# YOLO_v1_study
-
-YOLO_v1
+# YOLO_v1
 
 data parsing을 통해 bounding box추출
 

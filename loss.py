@@ -1,82 +1,66 @@
 import torch
-import torch.nn as nn
 from utils import intersecton_over_union
+import numpy as np
 
-class YoloLoss(nn.Module):
-    def __init__(self, S=7, B=2, C=20):
-        super(YoloLoss, self).__init__()
-        self.mse = nn.MSELoss(reduction='sum')
-        self.S = S
-        self.B = B
-        self.C = C
-        self.lambda_coord = 5
-        self.lambda_noobj = 0.5   
-
-    def forward(self, predictions, target):
-        # predictions are shaped (BATCH_SIZE, S*S(C+B*5) when inputted
-        # prediction은 예측하는 것, target은 ground truth
-        predictions = predictions.reshape(-1, self.S, self.S, self.C + self.B * 5)
+def loss_fn(predictions, target_whole, BATCH_SIZE):
+    # predictions are shaped (BATCH_SIZE, S*S(C+B*5) when inputted
+    # prediction은 예측하는 것, target은 ground truth
+    lambda_coord = 5
+    lambda_noobj = 0.5
+    predictions = predictions.reshape(-1,7,7,30)  
+    
+    threshold = 0.5  
+    loss = 0
+    # print("BATCH_SIZE", BATCH_SIZE)
+    for batch_index in range(predictions.shape[0]):
         
-        iou_b1 = intersecton_over_union(predictions[...,21:25], target[...,21:25])
-        iou_b2 = intersecton_over_union(predictions[...,26:30], target[...,21:25])
-        ious = torch.cat([iou_b1.unsqueeze(0), iou_b2.unsqueeze(0)], dim=0)   # 밑에다가 concat
+        # print(batch_index)
+        # for batch_index in range(1):
+        target = target_whole[batch_index, ...]
+        # print("target.shape", target.shape)
+        prediction_batch = predictions[batch_index,...]
+        confidence = target[...,20]
+        # print(confidence)
+        where = np.nonzero(confidence > threshold)
+        exist_box = confidence.unsqueeze(2) # unsqueeze 하기전에는 [7, 7]
+        # print(exist_box.shape)
+        # print("(1-exist_box).shape : ", (1-exist_box).shape)
+        no_object_loss = torch.sum(((1-exist_box) * (target[...,20]-prediction_batch[...,20]))**2)
+        no_object_loss += torch.sum(((1-exist_box) * (target[...,20]-prediction_batch[...,25]))**2)
+        loss = loss + lambda_noobj * no_object_loss 
+        for i in range(len(where)):
+            x_grid = where[i,0]
+            y_grid = where[i,1]
+            # class_index = torch.argmax(target[x_grid,y_grid,:20], dim=0)
+            
+            iou_b1 = intersecton_over_union(prediction_batch[x_grid,y_grid,21:25], target[x_grid,y_grid,21:25])
+            # print("iou_b1 : ", iou_b1)
+            iou_b2 = intersecton_over_union(prediction_batch[x_grid,y_grid,26:30], target[x_grid,y_grid,21:25])
+            # print("iou_b2 : ", iou_b2)
+            if iou_b1 > iou_b2:
+                # b1이 iou가 더 높아서 responsible
+                loss_coord = ((target[x_grid, y_grid, 21] - prediction_batch[x_grid, y_grid, 21])**2 
+                + (target[x_grid, y_grid, 22] - prediction_batch[x_grid, y_grid, 22])**2)
+                loss_coord = loss_coord + ((torch.sqrt(target[x_grid, y_grid, 23]) - torch.sign(prediction_batch[x_grid, y_grid, 24]) * torch.sqrt(abs(prediction_batch[x_grid, y_grid, 23])))**2 
+                + (torch.sqrt(target[x_grid, y_grid, 24])- torch.sign(prediction_batch[x_grid, y_grid, 24]) * torch.sqrt(abs(prediction_batch[x_grid, y_grid, 24])))**2) 
 
-        iou_maxes, bestbox = torch.max(ious, dim=0)
-        # iou_maxes는 iou가 큰 부분의 x y w h
-        # bestbox는 b1이 더 컸으면 0, b2가 더 컸으면 1
+                object_loss = (target[x_grid, y_grid, 20] - prediction_batch[x_grid, y_grid, 20])**2
+                class_loss = torch.sum((target[x_grid, y_grid, :20] - prediction_batch[x_grid, y_grid, :20])**2)
+                
+                loss = loss + lambda_coord * loss_coord + object_loss + class_loss
+                # print("1 is bigger")
+                # print(loss)
+            else:
+                loss_coord = ((target[x_grid, y_grid, 21] - prediction_batch[x_grid, y_grid, 26])**2 
+                + (target[x_grid, y_grid, 22] - prediction_batch[x_grid, y_grid, 27])**2)
+                loss_coord = loss_coord + ((torch.sqrt(target[x_grid, y_grid, 23]) - torch.sqrt(abs(prediction_batch[x_grid, y_grid, 28])))**2 
+                + (torch.sqrt(target[x_grid, y_grid, 24])- torch.sqrt(abs(prediction_batch[x_grid, y_grid, 29])))**2) 
 
-        exists_box = target[..., 20].unsqueeze(3)   
-        # object가 존재하는 부분만 1 나머지 0, unsqueeze는 dim 사라지는 것 보상
+                object_loss = (target[x_grid, y_grid, 20] - prediction_batch[x_grid, y_grid, 25])**2
+                class_loss = torch.sum((target[x_grid, y_grid, :20] - prediction_batch[x_grid, y_grid, :20])**2)
+                
+                loss = loss + lambda_coord * loss_coord + object_loss + class_loss
+                # print("2 is bigger")
+                # print(loss)
 
-        #### box coordinate ####
-        box_predictions = exists_box * (
-            (
-                bestbox * predictions[..., 26:30] +
-                (1- bestbox) * predictions[...,21:25]
-            )
-        )
-
-        box_targets = exists_box * target[...,21:25]
-        
-        box_predictions[...,2:4] = torch.sign(box_predictions[..., 2:4])*torch.sqrt(
-            torch.abs(box_predictions[...,2:4] + 1e-6)
-            )
-
-        box_targets[..., 2:4] = torch.sqrt(box_targets[...,2:4])
-
-        box_loss = self.mse(torch.flatten(box_predictions, end_dim=-2),
-        torch.flatten(box_targets, end_dim=-2))
-
-
-        ### object가 있는데 못잡는 경우 ###
-        pred_box = (
-            bestbox * predictions[..., 25:26] + (1-bestbox) * predictions[..., 20:21]
-        )
-        
-        object_loss = self.mse(
-            torch.flatten(exists_box * pred_box),
-            torch.flatten(exists_box* target[..., 20:21]),
-        )
-
-        ### object가 없는데 잡는 경우 ###
-        no_object_loss = self.mse(
-            torch.flatten((1-exists_box) * predictions[..., 20:21], start_dim=1),
-            torch.flatten((1-exists_box) * target[...,20:21], start_dim=1)
-        )
-        
-        # batch size는 건들이지 않는
-        no_object_loss = no_object_loss + self.mse(
-            torch.flatten((1-exists_box) * predictions[..., 25:26], start_dim=1),
-            torch.flatten((1-exists_box) * target[...,20:21], start_dim=1)
-        )
-
-        ### 잘못된 class로 분류하는 경우 ####
-        class_loss = self.mse(
-            torch.flatten(exists_box * predictions[..., :20], end_dim=-2),
-            torch.flatten(exists_box * target[..., :20], end_dim=-2),
-        )
-
-        loss = (
-            self.lambda_coord * box_loss +
-            object_loss + self.lambda_noobj * no_object_loss + class_loss)
-        return loss
+    return loss             

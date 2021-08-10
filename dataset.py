@@ -1,25 +1,19 @@
 from random import shuffle
-from numpy.matrixlib.defmatrix import matrix
 import pandas as pd
 import numpy as np
 import cv2
-import glob
 import matplotlib.pyplot as plt
 import xml.etree.ElementTree as ET
 import torch
 import os
 from torchvision import transforms
+from torch.utils.data import DataLoader
 
+pixel_size = 448  
 class_dict = {"aeroplane":1, "bicycle":2, "bird":3, "boat":4, "bottle":5, 
 "bus":6, "car":7, "cat":8, "chair":9, "cow":10, 
 "diningtable":11, "dog":12, "horse":13, "motorbike":14, "person":15,
 "pottedplant":16, "sheep":17, "sofa":18, "train":19, "tvmonitor":20}
-
-train_dir = './data/temp/train/JPEGImages'
-train_files = os.listdir(train_dir)
-xml_dir = './data/temp/train/Annotations'
-xml_files = os.listdir(xml_dir)
-# print(xml_files)
 
 class VOCDataset(torch.utils.data.Dataset):
     def __init__(self, file_list, file_dir, xml_list, xmlfile_dir, mode ='train', 
@@ -34,61 +28,65 @@ class VOCDataset(torch.utils.data.Dataset):
         self.B = B
         self.C = C
 
-    def __len__(self):  # 왜 반드시 선언해야하는지  <- notion 참고!
-        # print("file list 길이 : ", len(self.file_list))
+    def __len__(self): 
         return len(self.file_list)
 
     def __getitem__(self, index):
-        img = cv2.imread(os.path.join(self.file_dir, self.file_list[index]), cv2.IMREAD_COLOR) 
+        img = cv2.imread(os.path.join(self.file_dir, self.file_list[index]), 
+        cv2.IMREAD_COLOR) 
         img_height, img_width = img.shape[:2]
-        label_matrix = torch.zeros((self.S, self.S, self.C + 5))
- 
+        label_matrix = torch.zeros((self.S, self.S, self.C + self.B*5))
+    
         if img_height > img_width:
-            des_width = int(img_width*224/img_height)
-            des_height = 224
+            des_width = int(img_width*pixel_size/img_height)
+            des_height = pixel_size
         else:
-            des_width = 224
-            des_height = int(img_height*224/img_width)
+            des_width = pixel_size
+            des_height = int(img_height*pixel_size/img_width)
         
-        x_offset = (224-des_width) // 2
-        y_offset = (224-des_height) // 2
+        x_offset = (pixel_size-des_width) // 2
+        y_offset = (pixel_size-des_height) // 2
 
-        img_return = np.full((224,224,3), 127, dtype=np.uint8)  # 244 * 244 size로 변환!
+        img_return = np.full((pixel_size,pixel_size,3), 127, dtype=np.uint8)  # 224 * 224 size로 변환!
         img_resize = cv2.resize(img, (des_width, des_height), interpolation = cv2.INTER_AREA)
         img_return[y_offset:y_offset+des_height, x_offset:x_offset+des_width] = img_resize
 
         tree = ET.parse(os.path.join(self.xmlfile_dir, self.xml_list[index]))
         root = tree.getroot()
-        boxes = []
+     
         for object in root.findall('object'):
             class_name = object.find('name').text
             class_number = class_dict[class_name]
-            # print(type(class_number))
-            # print("class number = ", class_number)
+         
             for bndbox in object.findall('bndbox'):
-                x1 = int(bndbox.find('xmin').text)
-                y1 = int(bndbox.find('ymin').text)
-                x2 = int(bndbox.find('xmax').text)
-                y2 = int(bndbox.find('ymax').text)
+                x1 = int(float(bndbox.find('xmin').text))
+                y1 = int(float(bndbox.find('ymin').text))
+                x2 = int(float(bndbox.find('xmax').text))
+                y2 = int(float(bndbox.find('ymax').text))
                 x = ((x1+x2)/2)/img_width   # 0~1사이의 값으로 normalize
                 y = ((y1+y2)/2)/img_height
-                w = (x2-x1)/img_width
-                h = (y2-y1)/img_height
-
-                # print("x1 y1 x2 y2", x1, y1, x2, y2)
+                w = (x2-x1)/img_width * self.S
+                h = (y2-y1)/img_height * self.S
                 
-                # 중심점 좌표를 224*224 size에 맞게 변환!
+                # 중심점 좌표를 448*448 size에 맞게 변환!
                 if img_height > img_width:
                     # print('h, y는 그대로')
-                    x = (x_offset + (224 - x_offset*2)*x)/224
-                    w = w * des_width/224 
+                    x = (x_offset + (pixel_size - x_offset*2)*x)/pixel_size
+                    w = w * des_width/pixel_size 
+            
                 else:
                     # print('w ,x는 그대로')
-                    y = (y_offset + (224- y_offset*2)*y)/224
-                    h = h * des_height /224
-                boxes.append([class_number, x, y, w, h])
+                    y = (y_offset + (pixel_size- y_offset*2)*y)/pixel_size
+                    h = h * des_height /pixel_size
+
                 i = int(self.S*x)
+                if i>=7:
+                    i = 6
+
                 j = int(self.S*y)
+                if j>=7:
+                    j = 6
+
                 x_cell = self.S*x - i 
                 # grid를 경계로 0~1 사이 값으로 정규화 but why??
                 # grid별로 bounding box를 2개씩 예측하기 때문인듯
@@ -100,60 +98,8 @@ class VOCDataset(torch.utils.data.Dataset):
                     label_matrix[i, j, 22] = y_cell
                     label_matrix[i, j, 23] = w
                     label_matrix[i, j, 24] = h
-                
-                # 잘못 생각한 듯 어차피 25개까지만 있어도 충분함!
-                # else: 
-                #     # 만일 같은 grid에 object가 하나 더 있는 경우
-                #     # 단 이때는 같은 클래스로 취급해야 함!
-                #     label_matrix[i, j, 25] = 1
-                #     label_matrix[i, j, 26] = x_cell
-                #     label_matrix[i, j, 27] = y_cell
-                #     label_matrix[i, j, 28] = w
-                #     label_matrix[i, j, 29] = h
 
-                """
-                원점이 이미지 왼쪽 위
-
-                x1 y1이 bounding box의 왼쪽 위
-                x2 y2가 bounding box의 오른쪽 아래
-
-                (x1, y1)
-                
-                
-                            (x2, y2)
-                """
-                
-                ## 시각화 용도 ##
-                # draw = cv2.rectangle(img_return, (int((x-w/2)*224), int((y-h/2)*224)), 
-                # (int((x+w/2)*224), int((y+h/2)*224)), (0, 0, 255), 2)
-                # font = cv2.FONT_HERSHEY_SIMPLEX
-                # cv2.putText(img_return, class_name, (int((x-w/2)*224), int((y-h/2)*224)), font, 0.5, (255,255,255), 1)  
-        # return img_return, label_matrix, boxes # test용
-        img_return = np.transpose(img_return, (2,0,1))
-        img_return = torch.from_numpy(np.array(img_return)).float()
+        img_return = np.transpose(img_return, (2,0,1))  
+        # torch는 channel width height이고 opencv는 width height channel
+        img_return = torch.from_numpy(img_return).float().div(255.0)    # 학습시킬려면 flaot형태로
         return img_return, label_matrix
-
-
-# train_temp = VOCDataset(train_files, train_dir, xml_files, xml_dir, transform=transforms.ToTensor)
-# data_loader = torch.utils.data.DataLoader(train_temp, batch_size=1, shuffle=False, num_workers=0)
-
-# ## 시각화 용도 ##
-# # for img, label_torch, label in data_loader:
-# for img, label_torch in data_loader:
-#     # print(type(img))
-#     print(img.size())
-#     # print(type(label))
-#     img = img[0].numpy()    # torch to numpy to imshow
-#     # print("img size 가로, 세로, 채널 수 : ", img.shape)
-#     # label_for_show = np.array(label)
-#     # print("label matrix : ", label_for_show)
-#     # print("크기는 : ", label_for_show.shape)
-#     # print(label[0])
-
-#     # torch.set_printoptions(threshold=10000)   # input torch 확인용
-#     # print("@@@@@@@@@@")
-#     # print(label_torch)
-
-#     cv2.imshow('img', img)
-#     cv2.waitKey(0)
-# cv2.destroyAllWindows()
